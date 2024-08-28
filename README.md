@@ -47,7 +47,7 @@ Silk is a lightweight, single-file PHP shoutbox designed for secure and private 
 
     To deploy the Silk Shoutbox on a hosting platform, simply upload the shouts.php file to your server. No additional setup is required.
 
-
+**Default admin key:*** admin123 
 
    ## Screenshots 
 
