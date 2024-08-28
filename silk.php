@@ -133,6 +133,33 @@ function validateCsrfToken($token) {
     return isset($_SESSION['csrf_token']) && $_SESSION['csrf_token'] === $token;
 }
 
+
+function sanitizeMessage($message) {
+   $permittedTags = '<img>';
+    $permittedAttributes = ['src', 'alt', 'class'];
+
+    if (strpos($message, 'giphy-gif') !== false) {
+        return $message;
+    }
+
+    $message = strip_tags($message, $permittedTags);
+
+    return preg_replace_callback('/<img(.*?)>/', function($matches) use ($permittedAttributes) {
+        $attributeString = $matches[1];
+        preg_match_all('/(\w+)=("[^"]*"|\'[^\']*\'|[^\s>]*)/', $attributeString, $attributePairs, PREG_SET_ORDER);
+        $filteredAttributes = '';
+
+        foreach ($attributePairs as $attribute) {
+            $attributeName = strtolower($attribute[1]);
+            if (in_array($attributeName, $permittedAttributes)) {
+                $filteredAttributes .= " $attributeName=" . htmlspecialchars($attribute[2], ENT_QUOTES, 'UTF-8');
+            }
+        }
+
+        return '<img' . $filteredAttributes . '>';
+    }, $message);
+}
+
 function sendMessage($message, $uid, $username, $icon, $isAdmin) {
     $data = getData();
 
@@ -157,7 +184,7 @@ function sendMessage($message, $uid, $username, $icon, $isAdmin) {
          $icon = $data['users'][$uid]['icon'] ?? 'fas fa-user';
     }
 
-    $sanitizedMessage = strpos($message, 'giphy-gif') !== false ? $message : htmlspecialchars($message, ENT_NOQUOTES, 'UTF-8');
+     $sanitizedMessage = sanitizeMessage($message);
 
     $msg = [
         'user' => $username,
@@ -1793,9 +1820,13 @@ function displayMessage(data) {
     const contentSection = document.createElement('div');
 
     let messageContent = data.message;
-     messageContent = messageContent.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    messageContent = messageContent.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
-    contentSection.innerHTML = messageContent;
+    if (messageContent.includes('giphy-gif')) {
+        contentSection.innerHTML = messageContent;
+    } else {
+        contentSection.innerHTML = replaceEmoticonsWithIcons(messageContent);
+    }
 
     const timestampSection = document.createElement('div');
     timestampSection.classList.add('timestamp');
@@ -1808,6 +1839,7 @@ function displayMessage(data) {
     messagesContainer.appendChild(messageDiv);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
+
 
 
 
