@@ -1634,11 +1634,10 @@ function selectMention(username) {
     const textBeforeCursor = messageInput.value.substring(0, mentionStartPos);
     const textAfterCursor = messageInput.value.substring(cursorPos);
 
-    // Construct the mention text with a space after it
-    const mentionText = `@${username} `;
+      const mentionText = `@${username} `;
     const newText = `${textBeforeCursor}${mentionText}${textAfterCursor}`;
 
-    // Set the new value to the input and place the cursor right after the space
+    
     messageInput.value = newText;
     const newCursorPos = textBeforeCursor.length + mentionText.length;
     messageInput.setSelectionRange(newCursorPos, newCursorPos);
@@ -1659,7 +1658,7 @@ function sendMessage() {
     const message = messageInput.value.trim();
 
     if (message !== '') {
-        // Replace mentions and directly wrap them with a single span tag
+        
         const formattedMessage = message.replace(/@([^\s@]+)/g, '<span class="mention">@$1</span>');
 
         fetch('', {
