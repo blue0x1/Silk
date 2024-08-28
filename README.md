@@ -70,3 +70,14 @@ Silk is a lightweight, single-file PHP shoutbox designed for secure and private 
    **User Settings** 
    <br><br>
    ![image](https://github.com/user-attachments/assets/c28280aa-3a28-428c-afd2-a44dcf9ff1c4)
+
+   
+## License
+
+This project is licensed under a Proprietary License.
+
+© 2024 blue0x1 (Chokri Hammedi). All rights reserved.
+
+This software is the proprietary information of blue0x1 (Chokri Hammedi). The source code is provided as-is, for personal use only. Redistribution, modification, or commercial use of this code is strictly prohibited without explicit permission from the author.
+
+See the [LICENSE](./LICENSE) file for more details.
