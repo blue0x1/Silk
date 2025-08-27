@@ -135,27 +135,27 @@ function validateCsrfToken($token) {
 
 
 function sanitizeMessage($message) {
-   $permittedTags = '<img>';
+    $permittedTags = '<img>';
     $permittedAttributes = ['src', 'alt', 'class'];
-
-    if (strpos($message, 'giphy-gif') !== false) {
-        return $message;
-    }
-
+    
+    
+    
     $message = strip_tags($message, $permittedTags);
-
     return preg_replace_callback('/<img(.*?)>/', function($matches) use ($permittedAttributes) {
         $attributeString = $matches[1];
         preg_match_all('/(\w+)=("[^"]*"|\'[^\']*\'|[^\s>]*)/', $attributeString, $attributePairs, PREG_SET_ORDER);
         $filteredAttributes = '';
-
         foreach ($attributePairs as $attribute) {
             $attributeName = strtolower($attribute[1]);
+            $attributeValue = trim($attribute[2], '"\'');
             if (in_array($attributeName, $permittedAttributes)) {
-                $filteredAttributes .= " $attributeName=" . htmlspecialchars($attribute[2], ENT_QUOTES, 'UTF-8');
+               
+                if ($attributeName === 'src' && !preg_match('#^https?://[^/]+\.giphy\.com/#i', $attributeValue)) {
+                    continue;
+                }
+                $filteredAttributes .= " $attributeName=\"" . htmlspecialchars($attributeValue, ENT_QUOTES, 'UTF-8') . "\"";
             }
         }
-
         return '<img' . $filteredAttributes . '>';
     }, $message);
 }
@@ -237,8 +237,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 
-        if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
-            die('Security error: CSRF token mismatch.');
+         
+        if (isset($_POST['csrf_token'])) {
+            if (!hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+                die('Security error: CSRF token mismatch.');
+            }
+        } elseif (!isset($_COOKIE['chat_key'])) {
+             
+            die('Security error: CSRF token required.');
         }
 
         $key = htmlspecialchars(trim($_POST['key']));
@@ -261,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         } elseif (!empty($data['key']) && $key === $data['key']) {
             unset($_SESSION['rate_limit'][$_SERVER['REMOTE_ADDR']]);
-            if (!isset($_SESSION['username'])) {
+            if (!isset($_SESSION['username']) || !isset($_SESSION['uid'])) {
 
 
                  if (count($data['users']) >= $data['max_users']) {
@@ -303,18 +309,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['send']) && isset($_SESSION['authenticated'])) {
-        $message = $_POST['message'];
-        $uid = $_SESSION['uid'];
-        $username = $_SESSION['username'];
-        $icon = $data['users'][$uid]['icon'] ?? 'fas fa-user';
-        $isAdmin = $_SESSION['is_admin'] ?? false;
-
-        $msg = sendMessage($message, $uid, $username, $icon, $isAdmin);
-
-        echo json_encode($msg);
+    $message = $_POST['message'];
+    
+ 
+    if (!isset($_SESSION['uid'])) {
+     
+        error_log("Send attempt with no UID in session");
+        echo json_encode(['error' => 'User session invalid. Please refresh the page.']);
         exit;
     }
+    
+    $uid = $_SESSION['uid'];
+    $username = $_SESSION['username'] ?? 'Unknown User';
+    $isAdmin = $_SESSION['is_admin'] ?? false;
+    
+     
+    $icon = 'fas fa-user';  
+    if (isset($data['users'][$uid])) {
+        $icon = $data['users'][$uid]['icon'] ?? ($isAdmin ? 'fas fa-crown' : 'fas fa-user');
+    }
 
+    $msg = sendMessage($message, $uid, $username, $icon, $isAdmin);
+
+    echo json_encode($msg);
+    exit;
+}
     if (isset($_POST['fetch']) && isset($_SESSION['authenticated'])) {
         $messages = $data['messages'] ?? [];
         echo json_encode($messages);
@@ -397,10 +416,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['checkKey'])) {
-        if (!$_SESSION['authenticated']) {
-            echo json_encode(['error' => 'User not authenticated']);
-            exit;
-        }
+ 
+    if (!isset($_SESSION['authenticated']) || !$_SESSION['authenticated']) {
+        echo json_encode(['error' => 'User not authenticated']);
+        exit;
+    }
 
         if (($data['key_status'] == 1 && $_SESSION['key'] !== $data['key']) || empty($data['key'])) {
             if (!$_SESSION['is_admin']) {
@@ -1710,7 +1730,7 @@ function selectIcon(iconElement) {
 }
 
 function updateIconInMessages(newIcon) {
-    const currentUid = <?php echo json_encode($_SESSION['uid']); ?>;
+    const currentUid = <?php echo json_encode($_SESSION['uid'] ?? null); ?>;
     const messageElements = document.querySelectorAll('#messages .message');
 
     messageElements.forEach(function(messageElement) {
@@ -1802,47 +1822,109 @@ function sendGif(gifUrl) {
 }
 
 const isAdmin = <?php echo json_encode($isAdmin); ?>;
-let sessionIcon = <?php echo json_encode($_SESSION['icon']); ?>;
+let sessionIcon = <?php echo json_encode($_SESSION['icon'] ?? 'fas fa-user'); ?>;
 
-function displayMessage(data) {
+ 
+
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+ function displayMessage(data) {
     const messageDiv = document.createElement('div');
     messageDiv.classList.add('message');
-
     if (data.is_admin) {
         messageDiv.classList.add('admin-message');
     }
-
+    
+     
+    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
+    const icon = data.icon ? data.icon : 'fas fa-user';
+    const user = data.user ? data.user : 'Unknown User';
+    
     const userSection = document.createElement('div');
-    userSection.innerHTML = `<strong data-uid="${data.uid}"><i class="${data.icon}"></i> ${data.user}</strong>`;
+    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${icon}"></i> ${user}</strong>`;
     messageDiv.appendChild(userSection);
-
+    
     const contentSection = document.createElement('div');
-
-    let messageContent = data.message;
-    messageContent = messageContent.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-
-    if (messageContent.includes('giphy-gif')) {
-        contentSection.innerHTML = messageContent;
-    } else {
-        contentSection.innerHTML = replaceEmoticonsWithIcons(messageContent);
-    }
-
+    
+  
+    let messageContent = data.message || '';
+    
+   
+    messageContent = messageContent.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
+    
+   
+    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
+    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
+    
+    
+    contentSection.innerHTML = messageContent;
+    
     const timestampSection = document.createElement('div');
     timestampSection.classList.add('timestamp');
-    timestampSection.innerHTML = `<small>${data.timestamp}</small>`;
-
+    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
     messageDiv.appendChild(contentSection);
     messageDiv.appendChild(timestampSection);
-
+    
     const messagesContainer = document.getElementById('messages');
-    messagesContainer.appendChild(messageDiv);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    if (messagesContainer) {
+        messagesContainer.appendChild(messageDiv);
+        
+ 
+        const isAtBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 50;
+        if (isAtBottom) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+    }
 }
 
-
-
-
-
+function displayMessageWithoutScroll(data) {
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message');
+    if (data.is_admin) {
+        messageDiv.classList.add('admin-message');
+    }
+    
+    
+    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
+    const icon = data.icon ? data.icon : 'fas fa-user';
+    const user = data.user ? data.user : 'Unknown User';
+    
+    const userSection = document.createElement('div');
+    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${icon}"></i> ${user}</strong>`;
+    messageDiv.appendChild(userSection);
+    
+    const contentSection = document.createElement('div');
+    
+    
+    let messageContent = data.message || '';
+    
+ 
+    messageContent = messageContent.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
+    
+ 
+    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
+    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
+    
+ 
+    contentSection.innerHTML = messageContent;
+    
+    const timestampSection = document.createElement('div');
+    timestampSection.classList.add('timestamp');
+    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
+    messageDiv.appendChild(contentSection);
+    messageDiv.appendChild(timestampSection);
+    
+    const messagesContainer = document.getElementById('messages');
+    if (messagesContainer) {
+        messagesContainer.appendChild(messageDiv);
+ 
+    }
+}
 
 
 function replaceEmoticonsWithIcons(message) {
@@ -1873,6 +1955,9 @@ function replaceEmoticonsWithIcons(message) {
 }
 
 function fetchNewMessages() {
+    const messagesContainer = document.getElementById('messages');
+    const wasAtBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 50;
+    
     fetch('', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1880,9 +1965,16 @@ function fetchNewMessages() {
     })
     .then(response => response.json())
     .then(data => {
-        document.getElementById('messages').innerHTML = '';
+        messagesContainer.innerHTML = '';
         if (Array.isArray(data)) {
-            data.forEach(displayMessage);
+            data.forEach(message => {
+                displayMessageWithoutScroll(message);
+            });
+            
+ 
+            if (wasAtBottom) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
         }
     });
 }
@@ -1953,7 +2045,11 @@ function showAuthError(message) {
     }, 5000);
 }
 
-
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
 
 
 function authenticateWithKey(key) {
@@ -2121,7 +2217,7 @@ function handleThemeReset() {
  showAlert('Theme has been reset to default settings.');
         setTimeout(function() {
 
-            location.reload(); // Reload the page to reflect changes
+            location.reload();  
         }, 1500);
 
     })
