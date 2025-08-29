@@ -3,7 +3,7 @@
 </div>
 
 
-# $$\LARGE{\color{gold}Silk \space Shoutbox}$$
+# $$\LARGE{\color{gold}Silk \space Chat}$$
 
 <br>
 Silk is a lightweight, single-file PHP shoutbox designed for secure and private communication. The shoutbox operates without any setup requirements, logs, or external dependencies. All chat data is stored in an encrypted format, ensuring privacy and security.
