@@ -12,6 +12,13 @@
  * Written by blue0x1 (Chokri Hammedi) https://github.com/blue0x1  , August 2024.
  */
 
+ 
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('X-XSS-Protection: 1; mode=block');
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com data:; img-src 'self' data: https:;");
+
+ini_set('session.use_strict_mode', 1);
 ini_set('session.use_only_cookies', 1);
 ini_set('session.cookie_secure', isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? '1' : '0');
 ini_set('session.cookie_httponly', '1');
@@ -24,22 +31,75 @@ session_start();
 if (!isset($_SESSION['initiated'])) {
     session_regenerate_id(true);
     $_SESSION['initiated'] = true;
+    $_SESSION['created'] = time();
      createCsrfToken();
 }
 
+if (isset($_SESSION['created']) && time() - $_SESSION['created'] > 3600) {
+    session_regenerate_id(true);
+    $_SESSION['created'] = time();
+}
+
+function validateSession() {
+    if (isset($_SESSION['authenticated']) && $_SESSION['authenticated']) {
+ 
+        if (!isset($_SESSION['key']) && isset($_COOKIE['chat_key'])) {
+            $_SESSION['key'] = $_COOKIE['chat_key'];
+        }
+        
+ 
+        if (!isset($_SESSION['key'])) {
+            session_unset();
+            session_destroy();
+            return false;
+        }
+        
+        return true;
+    }
+    return false;
+}
+ 
 
 
 define('DATA_FILE', 'data.json');
-define('DEFAULT_ADMIN_KEY', 'admin123'); // default admin key
-define('ENCRYPTION_KEY', 'b14ca5898a4e4133bbce2ea2315a1916');   // Encryption Key Must be changed
-define('ENCRYPTION_IV', '1234567891011121');
+define('DEFAULT_ADMIN_KEY', 'admin123');
+
+function getEncryptionKey() {
+    $keyFile = 'encryption.key';
+    if (!file_exists($keyFile)) {
+        $key = random_bytes(32);  
+        file_put_contents($keyFile, $key);
+        return $key;
+    }
+    return file_get_contents($keyFile);
+}
+
+function getEncryptionIV() {
+    $ivFile = 'encryption.iv';
+    if (!file_exists($ivFile)) {
+        $iv = random_bytes(16);  
+        file_put_contents($ivFile, $iv);
+        return $iv;
+    }
+    return file_get_contents($ivFile);
+}
 
 function encryptData($data) {
-    return openssl_encrypt($data, 'AES-256-CBC', ENCRYPTION_KEY, 0, ENCRYPTION_IV);
+    return openssl_encrypt($data, 'AES-256-CBC', getEncryptionKey(), 0, getEncryptionIV());
 }
 
 function decryptData($data) {
-    return openssl_decrypt($data, 'AES-256-CBC', ENCRYPTION_KEY, 0, ENCRYPTION_IV);
+    return openssl_decrypt($data, 'AES-256-CBC', getEncryptionKey(), 0, getEncryptionIV());
+}
+
+function secureFile($filename) {
+    if (file_exists($filename)) {
+        chmod($filename, 0600);
+        $webRoot = $_SERVER['DOCUMENT_ROOT'];
+        if (strpos(realpath($filename), $webRoot) === 0) {
+            error_log("Security warning: Data file is accessible from web: " . $filename);
+        }
+    }
 }
 
 function getData() {
@@ -67,6 +127,7 @@ function getData() {
             'next_uid' => 2
         ];
         file_put_contents(DATA_FILE, encryptData(json_encode($defaultData)));
+        secureFile(DATA_FILE);
     }
 
     $encryptedData = file_get_contents(DATA_FILE);
@@ -89,6 +150,7 @@ function getData() {
 function saveData($data) {
     $encryptedData = encryptData(json_encode($data));
     file_put_contents(DATA_FILE, $encryptedData);
+    secureFile(DATA_FILE);
 }
 
 function getNextUID(&$data) {
@@ -101,25 +163,39 @@ function generateRandomUsername() {
     return 'user_' . rand(100, 999);
 }
 
-function checkAuthenticationRateLimit() {
+function checkRateLimit($action, $maxAttempts = 5, $timeWindow = 60) {
     $ip = $_SERVER['REMOTE_ADDR'];
-    $currentTime = time();
-    $lockoutDuration = 60;
-    $maxAttempts = 5;
-
-    if (!isset($_SESSION['auth_attempts'][$ip])) {
-        $_SESSION['auth_attempts'][$ip] = ['last_attempt_time' => $currentTime, 'attempt_count' => 1];
-    } else {
-        if (($currentTime - $_SESSION['auth_attempts'][$ip]['last_attempt_time']) < $lockoutDuration) {
-            $_SESSION['auth_attempts'][$ip]['attempt_count']++;
-            if ($_SESSION['auth_attempts'][$ip]['attempt_count'] > $maxAttempts) {
-                http_response_code(429); // Too Many Requests
-                die(json_encode(['error' => 'Too many authentication attempts. Please try again later.']));
-            }
-        } else {
-             $_SESSION['auth_attempts'][$ip] = ['last_attempt_time' => $currentTime, 'attempt_count' => 1];
-        }
+    $key = 'rate_limit_' . $action . '_' . $ip;
+    
+    if (!isset($_SESSION[$key])) {
+        $_SESSION[$key] = [
+            'attempts' => 1,
+            'first_attempt' => time()
+        ];
+        return true;
     }
+    
+    $data = $_SESSION[$key];
+    
+    if (time() - $data['first_attempt'] > $timeWindow) {
+        $_SESSION[$key] = [
+            'attempts' => 1,
+            'first_attempt' => time()
+        ];
+        return true;
+    }
+    
+    if ($data['attempts'] >= $maxAttempts) {
+        http_response_code(429);
+        die(json_encode(['error' => 'Too many attempts. Please try again later.']));
+    }
+    
+    $_SESSION[$key]['attempts']++;
+    return true;
+}
+
+function checkAuthenticationRateLimit() {
+    checkRateLimit('authenticate', 5, 60);
 }
 
 function createCsrfToken() {
@@ -130,35 +206,94 @@ function createCsrfToken() {
 }
 
 function validateCsrfToken($token) {
-    return isset($_SESSION['csrf_token']) && $_SESSION['csrf_token'] === $token;
+    return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
 }
 
 
-function sanitizeMessage($message) {
-    $permittedTags = '<img>';
-    $permittedAttributes = ['src', 'alt', 'class'];
+function validateInput($input, $type = 'string', $maxLength = 255) {
+    $input = trim($input);
     
+    switch ($type) {
+        case 'username':
+            if (preg_match('/^[a-zA-Z0-9_]{1,20}$/', $input)) {
+                return htmlspecialchars($input, ENT_QUOTES, 'UTF-8');
+            }
+            break;
+        case 'message':
+            return sanitizeMessage($input);
+        case 'integer':
+            if (filter_var($input, FILTER_VALIDATE_INT) && $input >= 0) {
+                return (int)$input;
+            }
+            break;
+        case 'color':
+            if (preg_match('/^#([a-f0-9]{6}|[a-f0-9]{3})$/i', $input)) {
+                return $input;
+            }
+            break;
+        default:
+            if (strlen($input) <= $maxLength) {
+                return htmlspecialchars($input, ENT_QUOTES, 'UTF-8');
+            }
+    }
     
-    
-    $message = strip_tags($message, $permittedTags);
-    return preg_replace_callback('/<img(.*?)>/', function($matches) use ($permittedAttributes) {
-        $attributeString = $matches[1];
-        preg_match_all('/(\w+)=("[^"]*"|\'[^\']*\'|[^\s>]*)/', $attributeString, $attributePairs, PREG_SET_ORDER);
-        $filteredAttributes = '';
-        foreach ($attributePairs as $attribute) {
-            $attributeName = strtolower($attribute[1]);
-            $attributeValue = trim($attribute[2], '"\'');
-            if (in_array($attributeName, $permittedAttributes)) {
-               
-                if ($attributeName === 'src' && !preg_match('#^https?://[^/]+\.giphy\.com/#i', $attributeValue)) {
-                    continue;
+    return false;
+}
+
+ function sanitizeMessage($message) {
+    $allowedTags = '<img><span>';
+    $allowedAttributes = [
+        'img'  => ['src', 'alt', 'class', 'width', 'height'],
+        'span' => ['class']
+    ];
+
+    $message = strip_tags($message, $allowedTags);
+
+    $dom = new DOMDocument();
+    libxml_use_internal_errors(true);
+    $dom->loadHTML('<?xml encoding="utf-8"?>' . $message, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+    libxml_clear_errors();
+
+    $nodes = [];
+    foreach ($dom->getElementsByTagName('*') as $n) $nodes[] = $n;
+
+    foreach ($nodes as $node) {
+        $name = $node->nodeName;
+
+        if (!isset($allowedAttributes[$name])) {
+            $textNode = $dom->createTextNode($node->textContent);
+            $node->parentNode->replaceChild($textNode, $node);
+            continue;
+        }
+
+        for ($i = $node->attributes->length - 1; $i >= 0; $i--) {
+            $attr = $node->attributes->item($i);
+            if (!in_array($attr->name, $allowedAttributes[$name], true)) {
+                $node->removeAttribute($attr->name);
+                continue;
+            }
+
+            if ($name === 'img' && $attr->name === 'src') {
+                $val = $attr->value;
+                if (stripos($val, 'data:') === 0 || !preg_match('#^https?://[^/]+\.giphy\.com/#i', $val)) {
+                    $node->removeAttribute('src');
                 }
-                $filteredAttributes .= " $attributeName=\"" . htmlspecialchars($attributeValue, ENT_QUOTES, 'UTF-8') . "\"";
             }
         }
-        return '<img' . $filteredAttributes . '>';
-    }, $message);
+    }
+
+    $body = $dom->getElementsByTagName('body')->item(0);
+    if ($body) {
+        $out = '';
+        foreach ($body->childNodes as $child) {
+            $out .= $dom->saveHTML($child);
+        }
+        return $out;
+    }
+
+    return $dom->saveHTML();
 }
+
 
 function sendMessage($message, $uid, $username, $icon, $isAdmin) {
     $data = getData();
@@ -228,6 +363,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json');
     $data = getData();
 
+    $skipCsrfActions = ['fetch', 'checkKey'];
+    $currentAction = key($_POST);
+    
+    if (!in_array($currentAction, $skipCsrfActions) && 
+        (!isset($_POST['csrf_token']) || !validateCsrfToken($_POST['csrf_token']))) {
+        http_response_code(403);
+        die(json_encode(['error' => 'CSRF token validation failed']));
+    }
+
     if (isset($_POST['authenticate'])) {
         checkAuthenticationRateLimit();
 
@@ -236,22 +380,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-
-         
-        if (isset($_POST['csrf_token'])) {
-            if (!hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
-                die('Security error: CSRF token mismatch.');
-            }
-        } elseif (!isset($_COOKIE['chat_key'])) {
-             
-            die('Security error: CSRF token required.');
-        }
-
-        $key = htmlspecialchars(trim($_POST['key']));
+        $key = validateInput(trim($_POST['key']), 'string', 100);
 
         if ($key === $data['admin_key']) {
+            session_regenerate_id(true);
             unset($_SESSION['rate_limit'][$_SERVER['REMOTE_ADDR']]);
             $_SESSION['is_admin'] = true;
+            $_SESSION['key'] = $key;
             $_SESSION['uid'] = 1;
             $_SESSION['username'] = $data['users'][1]['username'];
             $_SESSION['icon'] = $data['users'][1]['icon'] ?? 'fas fa-crown';
@@ -266,54 +401,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['admin' => true, 'username' => $data['users'][1]['username']]);
             exit;
         } elseif (!empty($data['key']) && $key === $data['key']) {
-            unset($_SESSION['rate_limit'][$_SERVER['REMOTE_ADDR']]);
-            if (!isset($_SESSION['username']) || !isset($_SESSION['uid'])) {
-
-
-                 if (count($data['users']) >= $data['max_users']) {
+    session_regenerate_id(true);
+    unset($_SESSION['rate_limit'][$_SERVER['REMOTE_ADDR']]);
+    
+    if (!isset($_SESSION['uid']) || !isset($_SESSION['username'])) {
+        if (count($data['users']) >= $data['max_users']) {
             echo json_encode(['error' => 'User limit reached']);
             exit;
         }
-
-                $randomUsername = generateRandomUsername();
-                $uid = getNextUID($data);
-                $data['users'][$uid] = [
-                    'uid' => $uid,
-                    'username' => $randomUsername,
-                    'icon' => $data['users']['default']['icon'] ?? 'fas fa-user'
-                ];
-                saveData($data);
-
-                $_SESSION['username'] = $randomUsername;
-                $_SESSION['uid'] = $uid;
+        $randomUsername = generateRandomUsername();
+        $uid = getNextUID($data);
+        $data['users'][$uid] = [
+            'uid' => $uid,
+            'username' => $randomUsername,
+            'icon' => $data['users']['default']['icon'] ?? 'fas fa-user'
+        ];
+        saveData($data);
+        $_SESSION['username'] = $randomUsername;
+        $_SESSION['uid'] = $uid;
+    }
+    
+    if (!isset($_SESSION['uid']) && isset($_SESSION['username'])) {
+        $foundUid = null;
+        foreach ($data['users'] as $user) {
+            if ($user['username'] === $_SESSION['username']) {
+                $foundUid = $user['uid'];
+                break;
             }
-            $_SESSION['is_admin'] = false;
-            $_SESSION['authenticated'] = true;
-            $_SESSION['icon'] = $data['users'][$_SESSION['uid']]['icon'] ?? 'fas fa-user';
-
-            setcookie('chat_key', $key, [
-                'expires' => time() + 3600,
-                'path' => '/',
-                'httponly' => true,
-                'samesite' => 'Strict'
-            ]);
-
-            $data['key_status'] = 0;
-            saveData($data);
-
-            echo json_encode(['authenticated' => true, 'username' => $_SESSION['username']]);
+        }
+        
+        if ($foundUid) {
+            $_SESSION['uid'] = $foundUid;
         } else {
+            $uid = getNextUID($data);
+            $data['users'][$uid] = [
+                'uid' => $uid,
+                'username' => $_SESSION['username'],
+                'icon' => $data['users']['default']['icon'] ?? 'fas fa-user'
+            ];
+            saveData($data);
+            $_SESSION['uid'] = $uid;
+        }
+    }
+    
+    $_SESSION['is_admin'] = false;
+    $_SESSION['authenticated'] = true;
+    $_SESSION['icon'] = $data['users'][$_SESSION['uid']]['icon'] ?? 'fas fa-user';
+    $_SESSION['key'] = $key;
+    
+    setcookie('chat_key', $key, [
+        'expires' => time() + 3600,
+        'path' => '/',
+        'httponly' => true,
+        'samesite' => 'Strict'
+    ]);
+    
+    $data['key_status'] = 0;
+    saveData($data);
+    echo json_encode(['authenticated' => true, 'username' => $_SESSION['username']]);
+} else {
             echo json_encode(['error' => 'Invalid key']);
         }
         exit;
     }
 
     if (isset($_POST['send']) && isset($_SESSION['authenticated'])) {
-    $message = $_POST['message'];
+    $message = validateInput($_POST['message'], 'message', 1000);
     
- 
     if (!isset($_SESSION['uid'])) {
-     
         error_log("Send attempt with no UID in session");
         echo json_encode(['error' => 'User session invalid. Please refresh the page.']);
         exit;
@@ -323,8 +478,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = $_SESSION['username'] ?? 'Unknown User';
     $isAdmin = $_SESSION['is_admin'] ?? false;
     
-     
-    $icon = 'fas fa-user';  
+    $icon = 'fas fa-user';
     if (isset($data['users'][$uid])) {
         $icon = $data['users'][$uid]['icon'] ?? ($isAdmin ? 'fas fa-crown' : 'fas fa-user');
     }
@@ -343,18 +497,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['saveSettings'])) {
         $response = ['success' => false];
 
-
-        if (!isset($_POST['csrf_token']) || !validateCsrfToken($_POST['csrf_token'])) {
-        echo json_encode(['error' => 'Security error: CSRF token mismatch.']);
-        exit;
-    }
-
         if (isset($_SESSION['authenticated'])) {
-            $newUsername = htmlspecialchars($_POST['username'] ?? $_SESSION['username']);
-            $newTitle = htmlspecialchars($_POST['title'] ?? $data['title']);
-            $newAdminKey = htmlspecialchars($_POST['adminKey'] ?? $data['admin_key']);
-            $icon = htmlspecialchars($_POST['icon'] ?? ($newUsername === $data['users'][1]['username'] ? ($data['users'][1]['icon'] ?? 'fas fa-crown') : $data['users'][$_SESSION['uid']]['icon']));
-            $giphyApiKey = htmlspecialchars($_POST['giphyApiKey'] ?? '');
+            $newUsername = validateInput($_POST['username'] ?? $_SESSION['username'], 'username', 20);
+            $newTitle = validateInput($_POST['title'] ?? $data['title'], 'string', 100);
+            $newAdminKey = validateInput($_POST['adminKey'] ?? $data['admin_key'], 'string', 100);
+            $icon = validateInput($_POST['icon'] ?? ($newUsername === $data['users'][1]['username'] ? ($data['users'][1]['icon'] ?? 'fas fa-crown') : $data['users'][$_SESSION['uid']]['icon']), 'string', 50);
+            $giphyApiKey = validateInput($_POST['giphyApiKey'] ?? '', 'string', 100);
+
+            if ($newUsername === false) {
+                echo json_encode(['error' => "Invalid username format."]);
+                exit;
+            }
 
             if (preg_match('/\s/', $newUsername)) {
                 echo json_encode(['error' => "Username cannot contain spaces."]);
@@ -384,12 +537,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-
-                $data['max_users'] = intval($_POST['maxUsers']) > 0 ? intval($_POST['maxUsers']) : $data['max_users'];
-
+                $maxUsers = validateInput($_POST['maxUsers'], 'integer');
+                $data['max_users'] = $maxUsers > 0 ? $maxUsers : $data['max_users'];
 
                 if (isset($_POST['icon']) && $_POST['icon'] !== '') {
-                    $data['users'][1]['icon'] = htmlspecialchars($_POST['icon']);
+                    $data['users'][1]['icon'] = validateInput($_POST['icon'], 'string', 50);
                 }
 
                 $data['giphy_api_key'] = $giphyApiKey;
@@ -416,40 +568,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['checkKey'])) {
- 
     if (!isset($_SESSION['authenticated']) || !$_SESSION['authenticated']) {
         echo json_encode(['error' => 'User not authenticated']);
         exit;
     }
 
-        if (($data['key_status'] == 1 && $_SESSION['key'] !== $data['key']) || empty($data['key'])) {
-            if (!$_SESSION['is_admin']) {
-                session_destroy();
-                setcookie('chat_key', '', time() - 3600, '/');
-            }
-            echo json_encode(['key_changed' => true]);
-        } else {
-            echo json_encode(['key_valid' => true]);
+    
+    $sessionKey = $_SESSION['key'] ?? '';
+    
+    if (($data['key_status'] == 1 && $sessionKey !== $data['key']) || empty($data['key'])) {
+        if (!$_SESSION['is_admin']) {
+            session_destroy();
+            setcookie('chat_key', '', time() - 3600, '/');
         }
-        exit;
+        echo json_encode(['key_changed' => true]);
+    } else {
+        echo json_encode(['key_valid' => true]);
     }
+    exit;
+}
 
     if (isset($_POST['saveThemeSettings']) && $_SESSION['is_admin']) {
-
-         if (!isset($_POST['csrf_token']) || !validateCsrfToken($_POST['csrf_token'])) {
-        echo json_encode(['error' => 'Security error: CSRF token mismatch.']);
-        exit;
-    }
-
-
-
-        $data['theme']['background_color'] = htmlspecialchars($_POST['backgroundColorInput'] ?? $data['theme']['background_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['primary_color'] = htmlspecialchars($_POST['primaryColorInput'] ?? $data['theme']['primary_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['secondary_color'] = htmlspecialchars($_POST['secondaryColorInput'] ?? $data['theme']['secondary_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['input_bg_color'] = htmlspecialchars($_POST['inputBgColorInput'] ?? $data['theme']['input_bg_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['title_bg_color'] = htmlspecialchars($_POST['titleBgColorInput'] ?? $data['theme']['title_bg_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['admin_bg_color'] = htmlspecialchars($_POST['adminBgColorInput'] ?? $data['theme']['admin_bg_color'], ENT_QUOTES, 'UTF-8');
-        $data['theme']['admin_text_color'] = htmlspecialchars($_POST['adminTextColorInput'] ?? $data['theme']['admin_text_color'], ENT_QUOTES, 'UTF-8');
+        $data['theme']['background_color'] = validateInput($_POST['backgroundColorInput'] ?? $data['theme']['background_color'], 'color');
+        $data['theme']['primary_color'] = validateInput($_POST['primaryColorInput'] ?? $data['theme']['primary_color'], 'color');
+        $data['theme']['secondary_color'] = validateInput($_POST['secondaryColorInput'] ?? $data['theme']['secondary_color'], 'color');
+        $data['theme']['input_bg_color'] = validateInput($_POST['inputBgColorInput'] ?? $data['theme']['input_bg_color'], 'color');
+        $data['theme']['title_bg_color'] = validateInput($_POST['titleBgColorInput'] ?? $data['theme']['title_bg_color'], 'color');
+        $data['theme']['admin_bg_color'] = validateInput($_POST['adminBgColorInput'] ?? $data['theme']['admin_bg_color'], 'color');
+        $data['theme']['admin_text_color'] = validateInput($_POST['adminTextColorInput'] ?? $data['theme']['admin_text_color'], 'color');
 
         saveData($data);
 
@@ -458,22 +604,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['updateSessionIcon']) && isset($_SESSION['authenticated'])) {
-    $newIcon = htmlspecialchars($_POST['icon']);
+    $newIcon = validateInput($_POST['icon'], 'string', 50);
     $_SESSION['icon'] = $newIcon;
 
     echo json_encode(['success' => true]);
     exit;
 }
 
-    if (isset($_POST['generate']) && $_SESSION['is_admin']) {
-        $newKey = bin2hex(random_bytes(16));
-        $_SESSION['generated_key'] = $newKey;
-        $data['key'] = $newKey;
-        $data['key_status'] = 1;
-        saveData($data);
-        echo json_encode(['key' => $newKey]);
+    if (isset($_POST['generate'])) {
+    if (!isset($_SESSION['is_admin']) || !$_SESSION['is_admin']) {
+        http_response_code(403);
+        echo json_encode(['error' => 'Unauthorized']);
         exit;
     }
+
+    $newKey = bin2hex(random_bytes(16));
+    $_SESSION['generated_key'] = $newKey;
+    $data['key'] = $newKey;
+    $data['key_status'] = 1;
+    saveData($data);
+    echo json_encode(['key' => $newKey]);
+    exit;
+}
+
 
     if (isset($_POST['resetTheme']) && $_SESSION['is_admin']) {
         $data['theme'] = [
@@ -527,35 +680,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['logout'])) {
-        session_unset();
-        session_destroy();
-        setcookie('chat_key', '', [
-            'expires' => time() - 3600,
-            'path' => '/',
-            'httponly' => true,
-            'samesite' => 'Strict'
-        ]);
-        echo json_encode(['success' => true]);
-        exit;
+   
+    $_SESSION = array();
+    
+   
+    if (ini_get("session.use_cookies")) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000,
+            $params["path"], $params["domain"],
+            $params["secure"], $params["httponly"]
+        );
     }
-
-    echo json_encode(['error' => 'Invalid request']);
+    
+   
+    session_destroy();
+    
+   
+    setcookie('chat_key', '', [
+        'expires' => time() - 3600,
+        'path' => '/',
+        'httponly' => true,
+        'samesite' => 'Strict'
+    ]);
+    
+    echo json_encode(['success' => true]);
     exit;
 }
 
 
 
-$authenticated = isset($_SESSION['authenticated']) && $_SESSION['authenticated'];
+}
+
+$authenticated = validateSession();
 $isAdmin = isset($_SESSION['is_admin']) && $_SESSION['is_admin'] === true;
 $data = getData();
 $title = $data['title'] ?? 'Silk Shoutbox';
 $adminKey = $data['admin_key'] ?? DEFAULT_ADMIN_KEY;
 $currentKey = $_SESSION['generated_key'] ?? $data['key'] ?? '';
 
+if ($authenticated && $isAdmin && $data['admin_key'] === DEFAULT_ADMIN_KEY) {
+    $_SESSION['show_key_warning'] = true;
+}
+
+
+
 
 ?>
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -565,6 +735,8 @@ $currentKey = $_SESSION['generated_key'] ?? $data['key'] ?? '';
     <title><?php echo $title; ?></title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uikit@3.21.9/dist/css/uikit.min.css" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+     
+
 
     <style>
      :root {
@@ -1552,19 +1724,76 @@ padding: 5px 20px;
 
 <?php endif; ?>
 
+<?php if (isset($_SESSION['show_key_warning']) && $_SESSION['show_key_warning']): ?>
+<div class="uk-alert-warning uk-text-center" uk-alert>
+    <p>Warning: You are using the default admin key. Please change it immediately in the settings for security reasons.</p>
+</div>
+<?php unset($_SESSION['show_key_warning']); ?>
+<?php endif; ?>
 
 
 <script src="https://cdn.jsdelivr.net/npm/uikit@3.21.9/dist/js/uikit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/uikit@3.21.9/dist/js/uikit-icons.min.js"></script>
 
 <script>
+ 
 
+const isAdmin = <?php echo json_encode($isAdmin); ?>;
+let sessionIcon = <?php echo json_encode($_SESSION['icon'] ?? 'fas fa-user'); ?>;
+let mentionStartPos = null;
+
+// Utility helpers
+function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+    return null;
+}
+
+function sanitizeInput(input) {
+    const element = document.createElement('div');
+    element.innerText = input;
+    return element.innerHTML;
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+function showAlert(message, context = 'general') {
+    const authErrorBox = document.getElementById('authError');
+    const generalAlertBox = document.getElementById('alertBox');
+
+    if (context === 'auth') {
+        if (authErrorBox) {
+            authErrorBox.innerText = message;
+            authErrorBox.style.display = 'block';
+            setTimeout(() => {
+                authErrorBox.style.display = 'none';
+            }, 3000);
+        }
+    } else {
+        if (generalAlertBox) {
+            generalAlertBox.innerText = message;
+            generalAlertBox.style.display = 'block';
+            setTimeout(() => {
+                generalAlertBox.style.display = 'none';
+            }, 3000);
+        }
+    }
+}
+
+// DOM ready
 document.addEventListener('DOMContentLoaded', function () {
+    
     const chatKey = getCookie('chat_key');
     if (chatKey) {
         authenticateWithKey(chatKey);
     }
 
+     
     const keyInput = document.getElementById('keyInput');
     if (keyInput) {
         keyInput.addEventListener('keydown', function (e) {
@@ -1575,6 +1804,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
         messageInput.addEventListener('keydown', function (e) {
@@ -1585,25 +1815,8 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    const settingsButton = document.getElementById('settingsButton');
-    if (settingsButton) {
-        settingsButton.addEventListener('click', function() {
-            const modal = UIkit.modal('#settingsModal');
-            modal.show();
-        });
-    }
-
-    if (localStorage.getItem('authenticated') === 'true') {
-        setInterval(fetchNewMessages, 3000);
-setInterval(checkKeyStatus, 60000);    }
-});
-
-
-document.addEventListener('DOMContentLoaded', function () {
-    const messageInput = document.getElementById('messageInput');
+     
     const mentionDropdown = document.getElementById('mentionDropdown');
-    let mentionStartPos = null;
-
     if (messageInput) {
         messageInput.addEventListener('input', function (e) {
             const cursorPos = messageInput.selectionStart;
@@ -1615,10 +1828,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 const mentionText = textBeforeCursor.substring(lastAtSymbol + 1);
 
                 if (mentionText.length > 0) {
-                    fetch(`?search_users=1&prefix=${encodeURIComponent(mentionText)}`)
+                    fetch(`?search_users=1&prefix=${encodeURIComponent(mentionText)}`, {
+                        method: 'GET',
+                        credentials: 'same-origin'
+                    })
                         .then(response => response.json())
                         .then(data => {
                             const mentionList = document.getElementById('mentionList');
+                            if (!mentionList) return;
                             mentionList.innerHTML = '';
 
                             data.forEach(user => {
@@ -1630,88 +1847,78 @@ document.addEventListener('DOMContentLoaded', function () {
                                 mentionList.appendChild(li);
                             });
 
-                            if (data.length > 0) {
+                            if (data.length > 0 && mentionDropdown) {
                                 mentionDropdown.style.display = 'block';
-                            } else {
+                            } else if (mentionDropdown) {
                                 mentionDropdown.style.display = 'none';
                             }
                         })
                         .catch(() => {
-                            mentionDropdown.style.display = 'none';
+                            if (mentionDropdown) mentionDropdown.style.display = 'none';
                         });
-                } else {
+                } else if (mentionDropdown) {
                     mentionDropdown.style.display = 'none';
                 }
-            } else {
+            } else if (mentionDropdown) {
                 mentionDropdown.style.display = 'none';
             }
         });
     }
 
+    
+    const settingsButton = document.getElementById('settingsButton');
+    if (settingsButton) {
+        settingsButton.addEventListener('click', function () {
+            const modal = UIkit.modal('#settingsModal');
+            modal.show();
+        });
+    }
+
+    
+    const logoutButton = document.getElementById('logoutButton');
+    if (logoutButton) {
+        logoutButton.addEventListener('click', function () {
+            logout();
+        });
+    }
+
+   
+    if (localStorage.getItem('authenticated') === 'true') {
+        setInterval(fetchNewMessages, 3000);
+        setInterval(checkKeyStatus, 60000);
+    }
+});  
+
+// Mention selection
 function selectMention(username) {
     const messageInput = document.getElementById('messageInput');
+    const mentionDropdown = document.getElementById('mentionDropdown');
+    if (!messageInput) return;
     const cursorPos = messageInput.selectionStart;
     const textBeforeCursor = messageInput.value.substring(0, mentionStartPos);
     const textAfterCursor = messageInput.value.substring(cursorPos);
 
-      const mentionText = `@${username} `;
+    const mentionText = `@${username} `;
     const newText = `${textBeforeCursor}${mentionText}${textAfterCursor}`;
 
-    
     messageInput.value = newText;
     const newCursorPos = textBeforeCursor.length + mentionText.length;
     messageInput.setSelectionRange(newCursorPos, newCursorPos);
 
     messageInput.focus();
-    mentionDropdown.style.display = 'none';
+    if (mentionDropdown) mentionDropdown.style.display = 'none';
 }
 
-
-
-
-
-
-});
-
-function sendMessage() {
-    const messageInput = document.getElementById('messageInput');
-    const message = messageInput.value.trim();
-
-    if (message !== '') {
-        
-        const formattedMessage = message.replace(/@([^\s@]+)/g, '<span class="mention">@$1</span>');
-
-        fetch('', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `send=1&message=${encodeURIComponent(formattedMessage)}`
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.message) {
-                messageInput.value = '';
-                displayMessage(data);
-            }
-        });
-    }
-}
-
-
-
-
-
-
-
-
-
+// Icon selection & session icon update
 function selectIcon(iconElement) {
     const iconCode = iconElement.getAttribute('data-icon');
     const settingsIconInput = document.getElementById('iconInput');
     const messageInput = document.getElementById('messageInput');
-    const dropdown = UIkit.dropdown(iconElement.closest('.uk-dropdown'));
 
+    const dropdown = UIkit.dropdown(iconElement.closest('.uk-dropdown'));
     if (settingsIconInput && iconElement.closest('#settingsModal')) {
-        document.getElementById('selectedIcon').className = iconCode;
+        const selectedIconElt = document.getElementById('selectedIcon');
+        if (selectedIconElt) selectedIconElt.className = iconCode;
         settingsIconInput.value = iconCode;
         UIkit.dropdown(iconElement.closest('.uk-dropdown')).hide();
     } else if (messageInput) {
@@ -1726,14 +1933,14 @@ function selectIcon(iconElement) {
         messageInput.focus();
     }
 
-    dropdown.hide();
+    if (dropdown) dropdown.hide();
 }
 
 function updateIconInMessages(newIcon) {
     const currentUid = <?php echo json_encode($_SESSION['uid'] ?? null); ?>;
     const messageElements = document.querySelectorAll('#messages .message');
 
-    messageElements.forEach(function(messageElement) {
+    messageElements.forEach(function (messageElement) {
         const userElement = messageElement.querySelector('strong');
         if (userElement && userElement.getAttribute('data-uid') == currentUid) {
             const iconElement = userElement.querySelector('i');
@@ -1743,64 +1950,86 @@ function updateIconInMessages(newIcon) {
         }
     });
 
-     sessionIcon = newIcon;
+    sessionIcon = newIcon;
     updateSessionIcon(newIcon);
 }
 
 function updateSessionIcon(newIcon) {
+    const body = new URLSearchParams();
+    body.append('updateSessionIcon', '1');
+    body.append('icon', newIcon);
+
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `updateSessionIcon=1&icon=${encodeURIComponent(newIcon)}`
+        body: body.toString()
     })
-    .then(response => response.json())
-    .then(data => {
-        if (!data.success) {
-            console.error('Failed to update session icon.');
-        }
-    })
-    .catch(error => {
-        console.error('Error updating session icon:', error);
-    });
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) {
+                console.error('Failed to update session icon.');
+            }
+        })
+        .catch(error => {
+            console.error('Error updating session icon:', error);
+        });
 }
 
 function sendMessage() {
     const messageInput = document.getElementById('messageInput');
-    const message = messageInput.value;
+    if (!messageInput) return;
+    const message = messageInput.value;  
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
 
-    const formattedMessage = formatMessageForMentions(message);
+    
+    if (message.trim() !== '') {
+        const body = new URLSearchParams();
+        body.append('send', '1');
+        body.append('message', message);  
+        if (csrfToken) {
+            body.append('csrf_token', csrfToken);
+        }
 
-    if (formattedMessage.trim() !== '') {
         fetch('', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `send=1&message=${encodeURIComponent(formattedMessage)}`
+            body: body.toString()
         })
         .then(response => response.json())
         .then(data => {
-            if (data.message) {
+            if (data && data.message) {
                 messageInput.value = '';
                 displayMessage(data);
+            } else if (data && data.error) {
+                showAlert('Failed to send message: ' + data.error);
             }
+        })
+        .catch(error => {
+            console.error('Error sending message:', error);
+            showAlert('Error sending message.');
         });
     }
 }
+
 
 function formatMessageForMentions(message) {
     return message.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
 }
 
-
-
-
+// GIFs
 function fetchGifs(query) {
     const apiKey = '<?php echo $data['giphy_api_key']; ?>';
+    if (!apiKey) return;
     const url = `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(query)}&limit=10&rating=G`;
 
     fetch(url)
         .then(response => response.json())
         .then(data => {
             const gifContainer = document.getElementById('gifContainer');
+            if (!gifContainer) return;
             gifContainer.innerHTML = '';
             data.data.forEach(gif => {
                 const img = document.createElement('img');
@@ -1817,116 +2046,12 @@ function fetchGifs(query) {
 
 function sendGif(gifUrl) {
     const messageInput = document.getElementById('messageInput');
+    if (!messageInput) return;
     messageInput.value += `<img src="${gifUrl}" alt="GIF" class="giphy-gif">`;
     sendMessage();
 }
 
-const isAdmin = <?php echo json_encode($isAdmin); ?>;
-let sessionIcon = <?php echo json_encode($_SESSION['icon'] ?? 'fas fa-user'); ?>;
-
- 
-
-
-function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
-}
-
- function displayMessage(data) {
-    const messageDiv = document.createElement('div');
-    messageDiv.classList.add('message');
-    if (data.is_admin) {
-        messageDiv.classList.add('admin-message');
-    }
-    
-     
-    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
-    const icon = data.icon ? data.icon : 'fas fa-user';
-    const user = data.user ? data.user : 'Unknown User';
-    
-    const userSection = document.createElement('div');
-    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${icon}"></i> ${user}</strong>`;
-    messageDiv.appendChild(userSection);
-    
-    const contentSection = document.createElement('div');
-    
-  
-    let messageContent = data.message || '';
-    
-   
-    messageContent = messageContent.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
-    
-   
-    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
-    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
-    
-    
-    contentSection.innerHTML = messageContent;
-    
-    const timestampSection = document.createElement('div');
-    timestampSection.classList.add('timestamp');
-    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
-    messageDiv.appendChild(contentSection);
-    messageDiv.appendChild(timestampSection);
-    
-    const messagesContainer = document.getElementById('messages');
-    if (messagesContainer) {
-        messagesContainer.appendChild(messageDiv);
-        
- 
-        const isAtBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 50;
-        if (isAtBottom) {
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-    }
-}
-
-function displayMessageWithoutScroll(data) {
-    const messageDiv = document.createElement('div');
-    messageDiv.classList.add('message');
-    if (data.is_admin) {
-        messageDiv.classList.add('admin-message');
-    }
-    
-    
-    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
-    const icon = data.icon ? data.icon : 'fas fa-user';
-    const user = data.user ? data.user : 'Unknown User';
-    
-    const userSection = document.createElement('div');
-    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${icon}"></i> ${user}</strong>`;
-    messageDiv.appendChild(userSection);
-    
-    const contentSection = document.createElement('div');
-    
-    
-    let messageContent = data.message || '';
-    
- 
-    messageContent = messageContent.replace(/@(\w+)/g, '<span class="mention">@$1</span>');
-    
- 
-    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
-    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
-    
- 
-    contentSection.innerHTML = messageContent;
-    
-    const timestampSection = document.createElement('div');
-    timestampSection.classList.add('timestamp');
-    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
-    messageDiv.appendChild(contentSection);
-    messageDiv.appendChild(timestampSection);
-    
-    const messagesContainer = document.getElementById('messages');
-    if (messagesContainer) {
-        messagesContainer.appendChild(messageDiv);
- 
-    }
-}
-
-
+// emoticons replacement helper  
 function replaceEmoticonsWithIcons(message) {
     const emoticonMap = {
         ':)': '<i class="fas fa-smile"></i>',
@@ -1954,228 +2079,352 @@ function replaceEmoticonsWithIcons(message) {
                   .replace(/\^_\^/g, '<i class="fas fa-ghost"></i>');
 }
 
+// Display message(s)
+function displayMessage(data) {
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message');
+    if (data.is_admin) messageDiv.classList.add('admin-message');
+
+    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
+    const icon = data.icon ? data.icon : 'fas fa-user';
+    const user = data.user ? data.user : 'Unknown User';
+
+    const userSection = document.createElement('div');
+    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${escapeHtml(icon)}"></i> ${escapeHtml(user)}</strong>`;
+    messageDiv.appendChild(userSection);
+
+    const contentSection = document.createElement('div');
+    let messageContent = data.message || '';
+
+     
+    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
+    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
+
+    
+    contentSection.innerHTML = messageContent;
+
+    const timestampSection = document.createElement('div');
+    timestampSection.classList.add('timestamp');
+    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
+
+    messageDiv.appendChild(contentSection);
+    messageDiv.appendChild(timestampSection);
+
+    const messagesContainer = document.getElementById('messages');
+    if (messagesContainer) {
+        const isAtBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 50;
+        messagesContainer.appendChild(messageDiv);
+        if (isAtBottom) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+    }
+}
+
+function displayMessageWithoutScroll(data) {
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message');
+    if (data.is_admin) messageDiv.classList.add('admin-message');
+
+    const uid = data.uid !== undefined && data.uid !== null ? data.uid : '';
+    const icon = data.icon ? data.icon : 'fas fa-user';
+    const user = data.user ? data.user : 'Unknown User';
+
+    const userSection = document.createElement('div');
+    userSection.innerHTML = `<strong data-uid="${uid}"><i class="${escapeHtml(icon)}"></i> ${escapeHtml(user)}</strong>`;
+    messageDiv.appendChild(userSection);
+
+    const contentSection = document.createElement('div');
+    let messageContent = data.message || '';
+
+    const gifPattern = /<img src=&quot;(https:\/\/[^&]+\.giphy\.com\/[^&]+)&quot; alt=&quot;GIF&quot; class=&quot;giphy-gif&quot;>/g;
+    messageContent = messageContent.replace(gifPattern, '<img src="$1" alt="GIF" class="giphy-gif">');
+
+    contentSection.innerHTML = messageContent;
+
+    const timestampSection = document.createElement('div');
+    timestampSection.classList.add('timestamp');
+    timestampSection.innerHTML = `<small>${data.timestamp || ''}</small>`;
+
+    messageDiv.appendChild(contentSection);
+    messageDiv.appendChild(timestampSection);
+
+    const messagesContainer = document.getElementById('messages');
+    if (messagesContainer) messagesContainer.appendChild(messageDiv);
+}
+
+// Polling for new messages
 function fetchNewMessages() {
     const messagesContainer = document.getElementById('messages');
+    if (!messagesContainer) return;
     const wasAtBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 50;
-    
+
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'fetch=1'
     })
-    .then(response => response.json())
-    .then(data => {
-        messagesContainer.innerHTML = '';
-        if (Array.isArray(data)) {
-            data.forEach(message => {
-                displayMessageWithoutScroll(message);
-            });
-            
- 
-            if (wasAtBottom) {
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        .then(response => response.json())
+        .then(data => {
+            messagesContainer.innerHTML = '';
+            if (Array.isArray(data)) {
+                data.forEach(message => {
+                    displayMessageWithoutScroll(message);
+                });
+                if (wasAtBottom) {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                }
             }
-        }
-    });
+        })
+        .catch(error => {
+            console.error('Error fetching messages:', error);
+        });
 }
 
 function checkKeyStatus() {
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'checkKey=1'
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.key_changed && !isAdmin) {
-            document.cookie = 'chat_key=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-            localStorage.removeItem('authenticated');
-            window.location.reload();
-        }
-    });
+        .then(response => response.json())
+        .then(data => {
+            if (data.key_changed && !isAdmin) {
+                document.cookie = 'chat_key=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+                localStorage.removeItem('authenticated');
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Error checking key status:', error);
+        });
 }
 
-
-
-
+// Authentication flows
 function authenticate() {
     const authKeyInput = document.getElementById('keyInput');
+    if (!authKeyInput) return;
     const key = authKeyInput.value;
-    const csrfToken = document.querySelector('input[name="csrf_token"]').value;
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
 
     if (!key) {
         showAuthError("Key cannot be empty.");
         return;
     }
 
+    const body = new URLSearchParams();
+    body.append('authenticate', '1');
+    body.append('key', key);
+    if (csrfToken) body.append('csrf_token', csrfToken);
+
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `authenticate=1&key=${encodeURIComponent(key)}&csrf_token=${encodeURIComponent(csrfToken)}`
+        body: body.toString()
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.admin || data.authenticated) {
-            localStorage.setItem('authenticated', 'true');
-            location.reload();
-        } else if (data.error) {
-            if (data.error === 'User limit reached') {
-                showAuthError("The maximum number of users has been reached. Please try again later.");
-            } else {
-                showAuthError("Wrong key, try again.");
+        .then(response => response.json())
+        .then(data => {
+            if (data.admin || data.authenticated) {
+                localStorage.setItem('authenticated', 'true');
+                location.reload();
+            } else if (data.error) {
+                if (data.error === 'User limit reached') {
+                    showAuthError("The maximum number of users has been reached. Please try again later.");
+                } else {
+                    showAuthError("Wrong key, try again.");
+                }
             }
-        }
-    })
-    .catch(error => {
-        console.error('Error during authentication:', error);
-        showAuthError("An unexpected error occurred. Please try again.");
-    });
+        })
+        .catch(error => {
+            console.error('Error during authentication:', error);
+            showAuthError("An unexpected error occurred. Please try again.");
+        });
 }
 
+function authenticateWithKey(key) {
+    const body = new URLSearchParams();
+    body.append('authenticate', '1');
+    body.append('key', key);
 
-
+    fetch('', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.admin || data.authenticated) {
+                if (localStorage.getItem('authenticated') !== 'true') {
+                    localStorage.setItem('authenticated', 'true');
+                    location.reload();
+                }
+            }
+        })
+        .catch(error => {
+            console.error('authenticateWithKey error:', error);
+        });
+}
 
 function showAuthError(message) {
     const authErrorBox = document.getElementById('authError');
     const authErrorMessage = document.getElementById('authErrorMessage');
-    authErrorMessage.textContent = message;
-    authErrorBox.style.display = 'block';
-    setTimeout(() => {
-        authErrorBox.style.display = 'none';
-    }, 5000);
-}
-
-function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
-}
-
-
-function authenticateWithKey(key) {
-    fetch('', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `authenticate=1&key=${encodeURIComponent(key)}`
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.admin || data.authenticated) {
-            if (localStorage.getItem('authenticated') !== 'true') {
-                localStorage.setItem('authenticated', 'true');
-                location.reload();
-            }
-        }
-    });
-}
-
-function showAlert(message, context = 'general') {
-    const authErrorBox = document.getElementById('authError');
-    const generalAlertBox = document.getElementById('alertBox');
-
-    if (context === 'auth') {
-        if (authErrorBox) {
-            authErrorBox.innerText = message;
-            authErrorBox.style.display = 'block';
-            setTimeout(() => {
-                authErrorBox.style.display = 'none';
-            }, 3000);
-        }
-    } else {
-        if (generalAlertBox) {
-            generalAlertBox.innerText = message;
-            generalAlertBox.style.display = 'block';
-            setTimeout(() => {
-                generalAlertBox.style.display = 'none';
-            }, 3000);
-        }
+    if (authErrorMessage) authErrorMessage.textContent = message;
+    if (authErrorBox) {
+        authErrorBox.style.display = 'block';
+        setTimeout(() => {
+            authErrorBox.style.display = 'none';
+        }, 5000);
     }
 }
 
+// Generate key  
+function generateKey() {
+    
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
 
-function logout() {
+    const body = new URLSearchParams();
+    body.append('generate', '1');
+    if (csrfToken) body.append('csrf_token', csrfToken);
+
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'logout=1'
+        body: body.toString()
     })
-    .then(response => response.json())
+    .then(response => {
+        const ctype = response.headers.get('content-type') || '';
+        if (ctype.indexOf('application/json') !== -1) {
+            return response.json().then(json => ({ ok: response.ok, json }));
+        } else {
+            return response.text().then(text => ({ ok: response.ok, text }));
+        }
+    })
+    .then(obj => {
+        if (obj.json) {
+            const data = obj.json;
+            if (data && data.key) {
+                const kc = document.getElementById('keyContainer');
+                if (kc) {
+                    kc.innerText = `Key: ${data.key}`;
+                    kc.style.display = 'block';
+                }
+                showAlert('New key generated');
+            } else if (data && data.error) {
+                console.error('Server returned error:', data);
+                showAlert(`Failed to generate key: ${data.error}`);
+            } else {
+                console.error('Unexpected JSON from server:', data);
+                showAlert('Failed to generate key — unexpected response.');
+            }
+        } else if (obj.text) {
+            console.error('Server returned non-JSON response:', obj.text);
+            showAlert('Failed to generate key — server returned non-JSON. See console.');
+        } else {
+            console.error('Unknown response object:', obj);
+            showAlert('Failed to generate key. See console.');
+        }
+    })
+    .catch(err => {
+        console.error('generateKey error:', err);
+        if (err && err.text) console.log('server response text:', err.text);
+        showAlert('Failed to generate key. See console for details.');
+    });
+}
+
+// Purge and confirm purge
+function purgeChat() {
+    UIkit.modal('#confirmPurgeModal').show();
+}
+
+function confirmPurge() {
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
+
+     
+
+    const body = new URLSearchParams();
+    body.append('purge', '1');
+    if (csrfToken) body.append('csrf_token', csrfToken);
+
+    fetch('', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRF-Token': csrfToken
+        },
+        body: body.toString()
+    })
+    .then(async response => {
+        const text = await response.text();
+        if (!response.ok) {
+            console.error('[confirmPurge] HTTP', response.status, text);
+            showAlert('Purge failed: server returned ' + response.status + '. See console for details.');
+            return Promise.reject({ status: response.status, text });
+        }
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            console.error('[confirmPurge] non-JSON success response:', text);
+            return Promise.reject({ status: 'non-json', text });
+        }
+    })
     .then(data => {
-        if (data.success) {
+        if (data && data.purged) {
+            UIkit.modal('#confirmPurgeModal').hide();
+            const messagesEl = document.getElementById('messages');
+            if (messagesEl) messagesEl.innerHTML = '';
             document.cookie = 'chat_key=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
             localStorage.removeItem('authenticated');
-            window.location.href = window.location.href.split('?')[0];
+            showAlert('Chat has been purged. Re-authenticating...');
+            setTimeout(() => window.location.reload(), 1200);
+        } else if (data && data.error) {
+            console.error('[confirmPurge] JSON error response:', data);
+            showAlert('Purge failed: ' + data.error);
         } else {
-            showAlert('Logout failed');
+            console.error('[confirmPurge] Unexpected JSON:', data);
+            showAlert('Purge failed — unexpected server response. See console.');
         }
+    })
+    .catch(err => {
+        console.error('[confirmPurge] error:', err);
     });
 }
 
-function saveSettings() {
-    const usernameInput = document.getElementById('usernameInput');
-    const titleInput = document.getElementById('titleInput');
-    const adminKeyInput = document.getElementById('adminKeyInput');
-    const iconInput = document.getElementById('iconInput');
-    const giphyApiKeyInput = document.getElementById('giphyApiKeyInput');
-    const maxUsersInput = document.getElementById('maxUsersInput');
-    const csrfToken = document.querySelector('input[name="csrf_token"]').value;
 
-    const username = usernameInput ? sanitizeInput(usernameInput.value) : '';
-    const title = titleInput ? sanitizeInput(titleInput.value) : '';
-    const adminKey = adminKeyInput ? sanitizeInput(adminKeyInput.value) : '';
-    const icon = iconInput ? sanitizeInput(iconInput.value) : '';
-    const giphyApiKey = giphyApiKeyInput ? sanitizeInput(giphyApiKeyInput.value) : '';
-    const maxUsers = maxUsersInput ? sanitizeInput(maxUsersInput.value) : '';
+function cancelPurge() {
+    UIkit.modal('#confirmPurgeModal').hide();
+    setTimeout(() => {
+        UIkit.modal('#settingsModal').show();
+    }, 300);
+}
 
-    let requestBody = `saveSettings=1&csrf_token=${encodeURIComponent(csrfToken)}`;
-    if (username) requestBody += `&username=${encodeURIComponent(username)}`;
-    if (title) requestBody += `&title=${encodeURIComponent(title)}`;
-    if (adminKey) requestBody += `&adminKey=${encodeURIComponent(adminKey)}`;
-    if (giphyApiKey) requestBody += `&giphyApiKey=${encodeURIComponent(giphyApiKey)}`;
-    if (maxUsers) requestBody += `&maxUsers=${encodeURIComponent(maxUsers)}`;
-
-     if (icon) {
-        requestBody += `&icon=${encodeURIComponent(icon)}`;
-    }
-
+// Theme reset / save
+function handleThemeReset() {
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: requestBody
+        body: 'resetTheme=1'
     })
     .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            if (icon) {
-                sessionIcon = icon;
-                updateIconInMessages(icon);
-            }
-            UIkit.modal('#settingsModal').hide();
-            showAlert('Settings saved successfully');
-        } else if (data.error) {
-            showSettingsError(data.error);
-        } else {
-            showSettingsError('Failed to save settings');
-        }
+    .then(() => {
+        UIkit.modal('#settingsModal').hide();
+        showAlert('Theme has been reset to default settings.');
+        setTimeout(function () {
+            location.reload();
+        }, 1500);
     })
     .catch(error => {
-        console.error('Error saving settings:', error);
-        showSettingsError('An error occurred while saving settings');
+        console.error('Error resetting theme:', error);
+        showAlert('An error occurred while resetting the theme.');
     });
-}
-
-
-
-
-
-function showSettingsError(message) {
-    const settingsError = document.getElementById('settingsError');
-    settingsError.textContent = message;
-    settingsError.style.display = 'block';
-
-    setTimeout(() => {
-        settingsError.style.display = 'none';
-    }, 3000);
 }
 
 function saveThemeSettings() {
@@ -2186,12 +2435,25 @@ function saveThemeSettings() {
     const titleBgColor = document.getElementById('titleBgColorInput').value;
     const adminBgColor = document.getElementById('adminBgColorInput').value;
     const adminTextColor = document.getElementById('adminTextColorInput').value;
-    const csrfToken = document.querySelector('input[name="csrf_token"]').value;
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
+
+    const body = new URLSearchParams();
+    body.append('saveThemeSettings', '1');
+    if (csrfToken) body.append('csrf_token', csrfToken);
+    body.append('backgroundColorInput', backgroundColor);
+    body.append('primaryColorInput', primaryColor);
+    body.append('secondaryColorInput', secondaryColor);
+    body.append('inputBgColorInput', inputBgColor);
+    body.append('titleBgColorInput', titleBgColor);
+    body.append('adminBgColorInput', adminBgColor);
+    body.append('adminTextColorInput', adminTextColor);
 
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `saveThemeSettings=1&csrf_token=${encodeURIComponent(csrfToken)}&backgroundColor=${encodeURIComponent(backgroundColor)}&primaryColor=${encodeURIComponent(primaryColor)}&secondaryColor=${encodeURIComponent(secondaryColor)}&inputBgColor=${encodeURIComponent(inputBgColor)}&titleBgColor=${encodeURIComponent(titleBgColor)}&adminBgColor=${encodeURIComponent(adminBgColor)}&adminTextColor=${encodeURIComponent(adminTextColor)}`
+        body: body.toString()
     })
     .then(response => response.json())
     .then(data => {
@@ -2201,130 +2463,103 @@ function saveThemeSettings() {
         } else {
             showAlert('Failed to save theme settings');
         }
-    });
-}
-
-
-function handleThemeReset() {
-    fetch('', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'resetTheme=1'
-    })
-    .then(response => response.json())
-    .then(() => {
-        UIkit.modal('#settingsModal').hide();
- showAlert('Theme has been reset to default settings.');
-        setTimeout(function() {
-
-            location.reload();  
-        }, 1500);
-
     })
     .catch(error => {
-        console.error('Error resetting theme:', error);
-        showAlert('An error occurred while resetting the theme.');
+        console.error('saveThemeSettings error:', error);
+        showAlert('Failed to save theme settings');
     });
 }
 
-function sanitizeInput(input) {
-    const element = document.createElement('div');
-    element.innerText = input;
-    return element.innerHTML;
-}
+// saveSettings
+function saveSettings() {
+    const usernameInput = document.getElementById('usernameInput');
+    const titleInput = document.getElementById('titleInput');
+    const adminKeyInput = document.getElementById('adminKeyInput');
+    const iconInput = document.getElementById('iconInput');
+    const giphyApiKeyInput = document.getElementById('giphyApiKeyInput');
+    const maxUsersInput = document.getElementById('maxUsersInput');
+    const csrfInput = document.querySelector('input[name="csrf_token"]');
+    const csrfToken = csrfInput ? csrfInput.value : '';
 
-function generateKey() {
+    const username = usernameInput ? sanitizeInput(usernameInput.value) : '';
+    const title = titleInput ? sanitizeInput(titleInput.value) : '';
+    const adminKey = adminKeyInput ? sanitizeInput(adminKeyInput.value) : '';
+    const icon = iconInput ? sanitizeInput(iconInput.value) : '';
+    const giphyApiKey = giphyApiKeyInput ? sanitizeInput(giphyApiKeyInput.value) : '';
+    const maxUsers = maxUsersInput ? sanitizeInput(maxUsersInput.value) : '';
+
+    const body = new URLSearchParams();
+    body.append('saveSettings', '1');
+    if (csrfToken) body.append('csrf_token', csrfToken);
+    if (username) body.append('username', username);
+    if (title) body.append('title', title);
+    if (adminKey) body.append('adminKey', adminKey);
+    if (giphyApiKey) body.append('giphyApiKey', giphyApiKey);
+    if (maxUsers) body.append('maxUsers', maxUsers);
+    if (icon) body.append('icon', icon);
+
     fetch('', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'generate=1'
+        body: body.toString()
     })
-    .then(response => response.json())
-    .then(data => {
-        document.getElementById('keyContainer').innerText = `Key: ${data.key}`;
-        document.getElementById('keyContainer').style.display = 'block';
-        showAlert('New key generated');
-    });
-}
-
-function purgeChat() {
-     UIkit.modal('#confirmPurgeModal').show();
-}
-
-
-function confirmPurge() {
-    fetch('', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'purge=1'
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.purged) {
-            UIkit.modal('#confirmPurgeModal').hide();
-            document.getElementById('messages').innerHTML = '';
-            showAlert('Chat has been purged. Re-authenticating...');
-            setTimeout(() => {
-                document.cookie = 'chat_key=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-
-localStorage.removeItem('authenticated');
-                window.location.reload();
-            }, 1500);
-        } else {
-            showAlert('Failed to purge chat');
-        }
-    });
-}
-
-function cancelPurge() {
-     UIkit.modal('#confirmPurgeModal').hide();
-
-     setTimeout(() => {
-        UIkit.modal('#settingsModal').show();
-    }, 300);
-}
-
-setInterval(function () {
-    if (localStorage.getItem('authenticated') === 'true') {
-        checkKeyStatus();
-    }
-}, 5000);
-
-function showAlert(message) {
-    const alertBox = document.getElementById('alertBox');
-    if (alertBox) {
-        alertBox.innerText = message;
-        alertBox.style.display = 'block';
-        setTimeout(() => {
-            alertBox.style.display = 'none';
-        }, 3000);
-    }
-}
-
-function getCookie(name) {
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; ${name}=`);
-    if (parts.length === 2) return parts.pop().split(';').shift();
-}
-
-function authenticateWithKey(key) {
-    fetch('', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `authenticate=1&key=${encodeURIComponent(key)}`
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.admin || data.authenticated) {
-            if (localStorage.getItem('authenticated') !== 'true') {
-                localStorage.setItem('authenticated', 'true');
-                location.reload();
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                if (icon) {
+                    sessionIcon = icon;
+                    updateIconInMessages(icon);
+                }
+                UIkit.modal('#settingsModal').hide();
+                showAlert('Settings saved successfully');
+            } else if (data.error) {
+                showSettingsError(data.error);
+            } else {
+                showSettingsError('Failed to save settings');
             }
-        }
-    });
+        })
+        .catch(error => {
+            console.error('Error saving settings:', error);
+            showSettingsError('An error occurred while saving settings');
+        });
 }
 
+function showSettingsError(message) {
+    const settingsError = document.getElementById('settingsError');
+    if (!settingsError) return;
+    settingsError.textContent = message;
+    settingsError.style.display = 'block';
+    setTimeout(() => {
+        settingsError.style.display = 'none';
+    }, 3000);
+}
+
+// Logout
+function logout() {
+    fetch('', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'logout=1'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            localStorage.removeItem('authenticated');
+            window.location.href = window.location.href.split('?')[0] + '?logout=' + Math.random();
+        } else {
+            showAlert('Logout failed. Please try again.');
+        }
+    })
+    .catch(error => {
+        console.error('Logout error:', error);
+        localStorage.removeItem('authenticated');
+        window.location.reload();
+    });
+}
 </script>
+
 <footer class="uk-text-center uk-padding-small uk-background-secondary uk-light">
     2024 © Silk by <a href="https://github.com/blue0x1" target="_blank" class="uk-link-reset">blue0x1</a>
 </footer>
