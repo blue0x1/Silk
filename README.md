@@ -2,6 +2,13 @@
   <img src="https://github.com/user-attachments/assets/719802ee-856d-4be6-80df-b4528393807f" alt="Silk Chat" width="350">
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/PHP-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
+  <img src="https://img.shields.io/badge/Single--File-App-gold?style=for-the-badge" alt="Single-file app">
+  <img src="https://img.shields.io/badge/Encrypted-AES--256-2ea44f?style=for-the-badge" alt="AES-256 encrypted">
+  <img src="https://img.shields.io/badge/License-Proprietary-red?style=for-the-badge" alt="Proprietary license">
+</p>
+
 # Silk Chat
 
 Silk Chat is a lightweight, single-file PHP shoutbox for private communication. It runs without a database, framework, or setup process. Messages, users, access keys, settings, and theme preferences are stored locally in encrypted form.
