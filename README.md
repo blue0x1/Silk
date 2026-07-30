@@ -65,7 +65,7 @@ Silk is a lightweight, single-file PHP shoutbox designed for secure and private 
    
    <br> 
    
-   ![Admin Control](./silk.gif)
+   ![Admin Control](silk.gif)
 
    **User Settings** 
    <br><br>
